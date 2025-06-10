@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+torch
+torchvision
+Pillow
+python-multipart
+fastai
+sqlmodel
+asyncpg
+bcrypt
