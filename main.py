@@ -127,36 +127,36 @@ class CuestionarioCreate(BaseModel):
 
 # --- CARGAR EL MODELO (AHORA ASUMIENDO UN nn.Module DE PYTORCH) ---
 model = None # 'model' será el nn.Module
-# try:
-#     print(f"Intentando cargar el modelo PyTorch (nn.Module) desde: {MODEL_PATH}")
-#     # map_location para asegurar que se carga en CPU.
-#     model = torch.load(MODEL_PATH, map_location=torch.device('cpu'), weights_only=False)
+try:
+    print(f"Intentando cargar el modelo PyTorch (nn.Module) desde: {MODEL_PATH}")
+    # map_location para asegurar que se carga en CPU.
+    model = torch.load(MODEL_PATH, map_location=torch.device('cpu'), weights_only=False)
 
-#     # Verificar si el objeto cargado es realmente un nn.Module
-#     if not isinstance(model, torch.nn.Module):
-#         raise TypeError(f"El archivo cargado no es un nn.Module. Tipo encontrado: {type(model)}")
+    # Verificar si el objeto cargado es realmente un nn.Module
+    if not isinstance(model, torch.nn.Module):
+        raise TypeError(f"El archivo cargado no es un nn.Module. Tipo encontrado: {type(model)}")
 
-#     model.eval() # Poner el modelo en modo evaluación
-#     print(f"Modelo PyTorch (nn.Module) cargado exitosamente desde {MODEL_PATH}")
+    model.eval() # Poner el modelo en modo evaluación
+    print(f"Modelo PyTorch (nn.Module) cargado exitosamente desde {MODEL_PATH}")
 
-# except FileNotFoundError:
-#      print(f"ERROR CRÍTICO - MODELO NO ENCONTRADO: {MODEL_PATH}")
-#      model = None
-# except ModuleNotFoundError as e_module:
-#     print(f"ERROR CRÍTICO - MODULO FALTANTE AL CARGAR MODELO: {e_module}")
-#     print("Esto significa que la definición de alguna capa o clase en tu modelo guardado no se encuentra.")
-#     print("Asegúrate de tener todas las bibliotecas necesarias (incluida fastai si alguna capa es de fastai).")
-#     model = None  
-# except RuntimeError as e_runtime:
-#     print(f"ERROR CRÍTICO - RUNTIME ERROR AL CARGAR MODELO: {e_runtime}")
-#     import traceback
-#     traceback.print_exc()
-#     model = None
-# except Exception as e_general:
-#     print(f"ERROR CRÍTICO - ERROR GENERAL AL CARGAR MODELO: {e_general}")
-#     import traceback
-#     traceback.print_exc()
-#     model = None
+except FileNotFoundError:
+     print(f"ERROR CRÍTICO - MODELO NO ENCONTRADO: {MODEL_PATH}")
+     model = None
+except ModuleNotFoundError as e_module:
+    print(f"ERROR CRÍTICO - MODULO FALTANTE AL CARGAR MODELO: {e_module}")
+    print("Esto significa que la definición de alguna capa o clase en tu modelo guardado no se encuentra.")
+    print("Asegúrate de tener todas las bibliotecas necesarias (incluida fastai si alguna capa es de fastai).")
+    model = None  
+except RuntimeError as e_runtime:
+    print(f"ERROR CRÍTICO - RUNTIME ERROR AL CARGAR MODELO: {e_runtime}")
+    import traceback
+    traceback.print_exc()
+    model = None
+except Exception as e_general:
+    print(f"ERROR CRÍTICO - ERROR GENERAL AL CARGAR MODELO: {e_general}")
+    import traceback
+    traceback.print_exc()
+    model = None
 
 # --- CONFIGURAR FastAPI ---
 app = FastAPI()
