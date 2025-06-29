@@ -8,3 +8,8 @@ fastai
 sqlmodel
 asyncpg
 bcrypt
+pytest 
+httpx[http2] 
+pytest-asyncio
+aiosqlite
+httpx

@@ -14,7 +14,7 @@ class Trabajador(SQLModel, table=True):
 
     # Campos de la tabla 'trabajadores'
     nombre: str = Field(max_length=255, nullable=False)
-    username: str = Field(max_length=100, nullable=False)
+    username: str = Field(max_length=100, nullable=False, unique=True)
     password: str = Field(max_length=255, nullable=False)
     fecha_de_nacimiento: Optional[date] = Field(default=None)
     genero: Optional[str] = Field(max_length=15, default=None)
@@ -69,8 +69,8 @@ class Cuestionario(SQLModel, table=True):
     __tablename__ = "cuestionarios"
     cuestionario_id: Optional[int] = Field(default=None, primary_key=True)
     sesion_id: int = Field(foreign_key="sesiones.sesion_id")
-    descripcion_trabajo: Optional[int] = Field(default=None)
-    nivel_de_sensacion_emocional: Optional[int] = Field(default=None)
+    descripcion_trabajo: Optional[str] = Field(default=None)
+    nivel_de_sensacion_estres: Optional[int] = Field(default=None)
     molestias_fisicas_visual: Optional[int] = Field(default=None)
     molestias_fisicas_otros: Optional[int] = Field(default=None)
     dificultad_concentracion: Optional[int] = Field(default=None)

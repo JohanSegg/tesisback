@@ -1,2 +1,83 @@
+# # # Entornos Virtuales # # #
+# Ignora la carpeta del entorno virtual, sea cual sea su nombre
+.venv/
 venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# # # Archivos de Caché y Compilados de Python # # #
+# Ignora las carpetas de caché de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# # # Archivos de Configuración de IDEs y Editores # # #
+# Visual Studio Code
+.vscode/
+# PyCharm
+.idea/
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+# Atom
+.atom/
+# Eclipse
+.project
+.pydevproject
+# NetBeans
+nbproject/
+
+# # # Archivos de Test y Cobertura # # #
+# Caché de Pytest
+.pytest_cache/
+# Base de datos de prueba de SQLite
+test.db
+*.db
+*.db-journal
+# Reportes de cobertura
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+
+# # # Archivos generados por el empaquetado de Python # # #
+# Setuptools
+*.egg
+*.egg-info/
+dist/
+build/
+# Ruedas (Wheels) y Tarballs
+*.whl
+*.tar.gz
+
+# # # Archivos de Dependencias (si se gestionan con herramientas como Poetry o Pipenv) # # #
+poetry.lock
+Pipfile.lock
+
+# # # Ficheros de Sistema Operativo # # #
+# macOS
+.DS_Store
+# Windows
+Thumbs.db
+ehthumbs.db
+
+# # # Archivos de Log y Salida # # #
+*.log
+*.log.*
+*.out
+*.tmp
+
+# # # Archivos de Modelo y Datos Grandes # # #
+# ¡MUY IMPORTANTE! Ignora tu modelo de estrés para no subirlo a Git
+stress.pth
 *.pth
+
+# # # Archivos de Entorno # # #
+# Nunca subas archivos con secretos o credenciales
+.env
+.env.*
+*.env

@@ -1,15 +1,17 @@
 # backend/main.py
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from http import HTTPStatus
 from typing import Dict, List, Optional, Tuple
 import bcrypt
-from fastapi import FastAPI, File, Form, Path, Query, UploadFile, HTTPException, Depends # Importar Depends
+from fastapi import FastAPI, File, Form, Path, Query, UploadFile, HTTPException, Depends, status # Importar Depends
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from database import create_db_and_tables, get_session # Importar funciones de database.py
 from sqlalchemy.ext.asyncio import AsyncSession # Importar AsyncSession
+from sqlalchemy.exc import IntegrityError
+import logging
 
 from sqlmodel import Session, select
 import torch
@@ -53,6 +55,22 @@ class UserCreate(BaseModel):
     horas_trabajo_semanal: Optional[int] = None
     horas_descanso_dia: Optional[int] = None
     
+# main.py
+
+class TrabajadorPublic(BaseModel):
+    trabajador_id: int
+    nombre: str
+    username: str
+    fecha_de_nacimiento: Optional[date] = None
+    genero: Optional[str] = None
+    estado_civil: Optional[str] = None
+    uso_de_anteojos: Optional[bool] = None
+    estudio_y_trabajo: Optional[str] = None
+    horas_trabajo_semanal: Optional[int] = None
+    horas_descanso_dia: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+    
 class SesionSummaryResponse(BaseModel): # O puedes usar Pydantic BaseModel si prefieres
     sesion_id: int
     trabajador_id: int
@@ -63,6 +81,7 @@ class SesionSummaryResponse(BaseModel): # O puedes usar Pydantic BaseModel si pr
     duracion_calculada_segundos: Optional[float] = None # Usamos float por si hay fracciones de segundo
     porcentaje_estres: Optional[float] = None
     total_lecturas: int
+    cuestionario: Optional[Cuestionario] = None # <-- CAMPO AÑADIDO
 
 
 class UserLogin(BaseModel):
@@ -97,38 +116,47 @@ class MonthlyOverallSummary(BaseModel):
     promedio_sesiones_por_dia_activo: Optional[float] = None # Días con al menos una sesión
     dias_con_actividad: int
 
+class CuestionarioCreate(BaseModel):
+    sesion_id: int
+    descripcion_trabajo: Optional[str] = None
+    nivel_de_sensacion_estres: Optional[int] = None
+    molestias_fisicas_visual: Optional[int] = None
+    molestias_fisicas_otros: Optional[int] = None
+    dificultad_concentracion: Optional[int] = None
+
+
 # --- CARGAR EL MODELO (AHORA ASUMIENDO UN nn.Module DE PYTORCH) ---
 model = None # 'model' será el nn.Module
-try:
-    print(f"Intentando cargar el modelo PyTorch (nn.Module) desde: {MODEL_PATH}")
-    # map_location para asegurar que se carga en CPU.
-    model = torch.load(MODEL_PATH, map_location=torch.device('cpu'), weights_only=False)
+# try:
+#     print(f"Intentando cargar el modelo PyTorch (nn.Module) desde: {MODEL_PATH}")
+#     # map_location para asegurar que se carga en CPU.
+#     model = torch.load(MODEL_PATH, map_location=torch.device('cpu'), weights_only=False)
 
-    # Verificar si el objeto cargado es realmente un nn.Module
-    if not isinstance(model, torch.nn.Module):
-        raise TypeError(f"El archivo cargado no es un nn.Module. Tipo encontrado: {type(model)}")
+#     # Verificar si el objeto cargado es realmente un nn.Module
+#     if not isinstance(model, torch.nn.Module):
+#         raise TypeError(f"El archivo cargado no es un nn.Module. Tipo encontrado: {type(model)}")
 
-    model.eval() # Poner el modelo en modo evaluación
-    print(f"Modelo PyTorch (nn.Module) cargado exitosamente desde {MODEL_PATH}")
+#     model.eval() # Poner el modelo en modo evaluación
+#     print(f"Modelo PyTorch (nn.Module) cargado exitosamente desde {MODEL_PATH}")
 
-except FileNotFoundError:
-     print(f"ERROR CRÍTICO - MODELO NO ENCONTRADO: {MODEL_PATH}")
-     model = None
-except ModuleNotFoundError as e_module:
-    print(f"ERROR CRÍTICO - MODULO FALTANTE AL CARGAR MODELO: {e_module}")
-    print("Esto significa que la definición de alguna capa o clase en tu modelo guardado no se encuentra.")
-    print("Asegúrate de tener todas las bibliotecas necesarias (incluida fastai si alguna capa es de fastai).")
-    model = None  
-except RuntimeError as e_runtime:
-    print(f"ERROR CRÍTICO - RUNTIME ERROR AL CARGAR MODELO: {e_runtime}")
-    import traceback
-    traceback.print_exc()
-    model = None
-except Exception as e_general:
-    print(f"ERROR CRÍTICO - ERROR GENERAL AL CARGAR MODELO: {e_general}")
-    import traceback
-    traceback.print_exc()
-    model = None
+# except FileNotFoundError:
+#      print(f"ERROR CRÍTICO - MODELO NO ENCONTRADO: {MODEL_PATH}")
+#      model = None
+# except ModuleNotFoundError as e_module:
+#     print(f"ERROR CRÍTICO - MODULO FALTANTE AL CARGAR MODELO: {e_module}")
+#     print("Esto significa que la definición de alguna capa o clase en tu modelo guardado no se encuentra.")
+#     print("Asegúrate de tener todas las bibliotecas necesarias (incluida fastai si alguna capa es de fastai).")
+#     model = None  
+# except RuntimeError as e_runtime:
+#     print(f"ERROR CRÍTICO - RUNTIME ERROR AL CARGAR MODELO: {e_runtime}")
+#     import traceback
+#     traceback.print_exc()
+#     model = None
+# except Exception as e_general:
+#     print(f"ERROR CRÍTICO - ERROR GENERAL AL CARGAR MODELO: {e_general}")
+#     import traceback
+#     traceback.print_exc()
+#     model = None
 
 # --- CONFIGURAR FastAPI ---
 app = FastAPI()
@@ -150,11 +178,13 @@ async def on_startup():
     
     
 
-@app.post("/register/", response_model=Trabajador) # Devolver el objeto Trabajador creado
+@app.post("/register/", response_model=TrabajadorPublic, status_code=status.HTTP_201_CREATED)
 async def register_user(
     user_data: UserCreate, # Usar el modelo Pydantic para la validación de entrada
     session: AsyncSession = Depends(get_session)
 ):
+    logging.info(f"Recibida petición de registro para el usuario: {user_data.username}")
+
     # Hashear la contraseña antes de guardarla en la base de datos
     # bcrypt.gensalt() genera un salt aleatorio
     # .decode('utf-8') es necesario porque hashpw devuelve bytes
@@ -178,23 +208,23 @@ async def register_user(
 
     try:
         session.add(new_trabajador)
-        await session.commit() # Guardar el nuevo trabajador en la DB
-        await session.refresh(new_trabajador) # Refrescar para obtener el ID generado y otros valores por defecto
-        return new_trabajador # Devolver el objeto trabajador creado
-    except Exception as e:
-        # Aquí puedes manejar errores específicos, como un nombre de usuario duplicado
-        # En SQLModel/SQLAlchemy, esto se manifestaría como una IntegrityError
-        if "duplicate key value violates unique constraint" in str(e): # Ejemplo de manejo de error de unicidad
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST,
-                detail="El nombre de usuario ya existe. Por favor, elige otro."
-            )
-        print(f"Error al crear usuario: {e}")
-        import traceback
-        traceback.print_exc()
+        await session.commit()
+        await session.refresh(new_trabajador)
+        return new_trabajador
+    except IntegrityError:
+        # Este bloque se ejecutará si la restricción 'unique=True' del username falla.
+        await session.rollback()
         raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-            detail="Error al crear la cuenta de usuario. {e}"
+            status_code=status.HTTP_409_CONFLICT,
+            detail="El nombre de usuario ya existe. Por favor, elige otro."
+        )
+    except Exception as e:
+        # Captura cualquier otro error inesperado durante la creación.
+        await session.rollback()
+        print(f"Error inesperado al crear usuario: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error interno al crear la cuenta de usuario."
         )
 
 # --- NUEVO ENDPOINT: Iniciar sesión ---
@@ -522,49 +552,53 @@ async def _calculate_session_summary_details(
         
     return total_lecturas, porcentaje_estres, duracion_calculada_segundos
 
-@app.get("/trabajadores/{trabajador_id}/sesiones/summary/monthly/", response_model=List[SesionSummaryResponse])
-async def get_monthly_session_summaries_for_worker(
+@app.get("/trabajadores/{trabajador_id}/sesiones/summary/", response_model=List[SesionSummaryResponse])
+async def get_session_summaries_by_date_range(
     trabajador_id: int,
-    month: int = Query(..., ge=1, le=12, description="Número del mes (1-12)"),
-    year: Optional[int] = Query(None, description="Año (ej. 2023). Si no se provee, se usa el año actual."),
+    start_date: Optional[date] = Query(None, description="Fecha de inicio del rango (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="Fecha de fin del rango (YYYY-MM-DD)"),
     db_session: AsyncSession = Depends(get_session)
 ):
-    current_date = date.today()
-    if year is None:
-        year_to_filter = current_date.year
-    else:
-        year_to_filter = year
+    # --- Lógica de fechas (sin cambios) ---
+    end_date_to_use = end_date or date.today()
+    start_date_to_use = start_date or (end_date_to_use - timedelta(days=30))
 
-    print("xd")
-    # Validar que el mes y año forman una fecha válida (básico)
-    try:
-        start_of_month = date(year_to_filter, month, 1)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Mes o año inválido.")
-
-    # Calcular el primer día del siguiente mes para el rango
-    if month == 12:
-        start_of_next_month = date(year_to_filter + 1, 1, 1)
-    else:
-        start_of_next_month = date(year_to_filter, month + 1, 1)
-
-    # Obtener todas las sesiones del trabajador en el mes y año especificados
-    sesiones_statement = select(Sesion).where(
-        Sesion.trabajador_id == trabajador_id,
-        Sesion.fecha_sesion >= start_of_month,
-        Sesion.fecha_sesion < start_of_next_month # fecha_sesion es solo date, así que esto funciona bien
-    ).order_by(Sesion.fecha_sesion, Sesion.hora_inicio) # Opcional, pero bueno para consistencia
-
+    # --- Consulta de Sesiones (sin cambios) ---
+    sesiones_statement = (
+        select(Sesion)
+        .where(
+            Sesion.trabajador_id == trabajador_id,
+            Sesion.fecha_sesion >= start_date_to_use,
+            Sesion.fecha_sesion <= end_date_to_use
+        )
+        .order_by(Sesion.fecha_sesion.desc(), Sesion.hora_inicio.desc())
+    )
     sesiones_results = await db_session.execute(sesiones_statement)
-    sesiones_del_mes = sesiones_results.scalars().all()
+    sesiones_del_rango = sesiones_results.scalars().all()
 
-    if not sesiones_del_mes:
-        return [] # Devuelve una lista vacía si no hay sesiones
+    if not sesiones_del_rango:
+        return []
+    
+    # --- [NUEVO] Consulta eficiente de Cuestionarios ---
+    # 1. Obtenemos los IDs de todas las sesiones encontradas
+    sesion_ids = [s.sesion_id for s in sesiones_del_rango if s.sesion_id is not None]
 
-    monthly_summaries: List[SesionSummaryResponse] = []
-    for sesion_obj in sesiones_del_mes:
+    cuestionarios_map: Dict[int, Cuestionario] = {}
+    if sesion_ids:
+        # 2. Hacemos UNA SOLA consulta para traer todos los cuestionarios de esas sesiones
+        cuestionarios_stmt = select(Cuestionario).where(Cuestionario.sesion_id.in_(sesion_ids))
+        cuestionarios_result = await db_session.execute(cuestionarios_stmt)
+        # 3. Creamos un diccionario para búsqueda rápida (ID de sesión -> objeto Cuestionario)
+        cuestionarios_map = {c.sesion_id: c for c in cuestionarios_result.scalars().all()}
+
+    # --- Procesamiento y respuesta (modificado) ---
+    summaries: List[SesionSummaryResponse] = []
+    for sesion_obj in sesiones_del_rango:
         total_lecturas, porcentaje_estres, duracion_segundos = \
             await _calculate_session_summary_details(sesion_obj, db_session)
+        
+        # [NUEVO] Buscamos el cuestionario en nuestro mapa (sin llamar a la DB)
+        cuestionario_asociado = cuestionarios_map.get(sesion_obj.sesion_id)
         
         summary = SesionSummaryResponse(
             sesion_id=sesion_obj.sesion_id,
@@ -575,11 +609,12 @@ async def get_monthly_session_summaries_for_worker(
             estado_grabacion=sesion_obj.estado_grabacion,
             duracion_calculada_segundos=duracion_segundos,
             porcentaje_estres=porcentaje_estres,
-            total_lecturas=total_lecturas
+            total_lecturas=total_lecturas,
+            cuestionario=cuestionario_asociado # <-- PASAMOS EL CUESTIONARIO
         )
-        monthly_summaries.append(summary)
+        summaries.append(summary)
 
-    return monthly_summaries
+    return summaries
 
 
 @app.get(
@@ -846,10 +881,90 @@ async def get_monthly_overall_summary_for_worker(
         dias_con_actividad=dias_con_actividad_count
     )
 
+@app.get("/cuestionarios/", response_model=List[Cuestionario], summary="Obtener todos los cuestionarios")
+async def get_all_cuestionarios(
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Obtiene y devuelve una lista de todos los cuestionarios registrados en la base de datos.
+    """
+    try:
+        # Crea una sentencia para seleccionar todos los registros de la tabla 'cuestionarios'
+        statement = select(Cuestionario).order_by(Cuestionario.created_at.desc()) # Opcional: ordenar por más reciente
+        
+        # Ejecuta la sentencia de forma asíncrona
+        results = await session.execute(statement)
+        
+        # Obtiene todos los objetos Cuestionario
+        cuestionarios = results.scalars().all()
+        
+        return cuestionarios
+        
+    except Exception as e:
+        # Manejo de errores genérico
+        print(f"Error al obtener cuestionarios: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail="Ocurrió un error al intentar obtener la lista de cuestionarios."
+        )
 
-# --- SERVIR ARCHIVOS ESTÁTICOS DEL FRONTEND ---
-frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
-app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
+@app.post(
+    "/cuestionarios/", 
+    response_model=Cuestionario, 
+    status_code=status.HTTP_201_CREATED,
+    summary="Crear un nuevo cuestionario para una sesión"
+)
+async def create_cuestionario(
+    cuestionario_data: CuestionarioCreate,
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Crea un nuevo registro de cuestionario asociado a una sesión.
+    Valida que la sesión exista y que no tenga ya un cuestionario.
+    """
+    # 1. Validar que la sesión exista
+    sesion_stmt = select(Sesion).where(Sesion.sesion_id == cuestionario_data.sesion_id)
+    sesion_result = await session.execute(sesion_stmt)
+    if not sesion_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"La sesión con ID {cuestionario_data.sesion_id} no fue encontrada."
+        )
+
+    # 2. Validar que no exista ya un cuestionario para esta sesión (regla de 1 a 1)
+    existing_q_stmt = select(Cuestionario).where(Cuestionario.sesion_id == cuestionario_data.sesion_id)
+    existing_q_result = await session.execute(existing_q_stmt)
+    if existing_q_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Ya existe un cuestionario registrado para la sesión ID {cuestionario_data.sesion_id}."
+        )
+        
+    # 3. Crear el nuevo objeto Cuestionario
+    current_utc_time = datetime.now(timezone.utc)
+    new_cuestionario = Cuestionario(
+        **cuestionario_data.model_dump(), # Desempaqueta los datos del modelo Pydantic
+        created_at=current_utc_time,
+        updated_at=current_utc_time
+    )
+
+    try:
+        session.add(new_cuestionario)
+        await session.commit()
+        await session.refresh(new_cuestionario)
+        return new_cuestionario
+    except Exception as e:
+        await session.rollback() # Importante hacer rollback en caso de error
+        print(f"Error al crear el cuestionario: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error interno al guardar el cuestionario."
+        )
+
+
+
 
 if __name__ == "__main__":
     import uvicorn
