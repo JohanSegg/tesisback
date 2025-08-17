@@ -326,15 +326,15 @@ async def commit_with_retry(session, attempts=3):
     backoff = 0.5
     for i in range(attempts):
         try:
-            await commit_with_retry(session)
+            await session.commit()
             return
-        except (asyncio.TimeoutError, Exception) as e:
-            # si es el último intento -> relanza
+        except (asyncio.TimeoutError, Exception):
             if i == attempts - 1:
                 await session.rollback()
                 raise
             await asyncio.sleep(backoff)
-            backoff *= 2  # exponencial
+            backoff *= 2
+
 
 
 @app.post("/sessions/start/", response_model=Sesion)
