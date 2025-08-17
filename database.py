@@ -23,9 +23,19 @@ DATABASE_URL = os.getenv(
 # Crea engine asíncrono
 engine = create_async_engine(
     DATABASE_URL,
-    echo=True,                # pon False en prod si quieres menos logs
-    pool_pre_ping=True        # evita conexiones muertas
-    # connect_args={}         # rara vez necesario con asyncpg si usas ?ssl=true
+    echo=False,
+    pool_pre_ping=True,          # Detecta y reemplaza conexiones muertas
+    pool_recycle=300,            # Recicla conexiones cada 5 min
+    pool_size=5,                 # Tamaño del pool
+    max_overflow=10,             # Conexiones extra si se necesita
+    connect_args={
+        # Para asyncpg:
+        "timeout": 30,           # Conexión
+        "command_timeout": 60,   # Órdenes
+        # Fuerza SSL con asyncpg
+        "ssl": "require",        # Si falla, prueba True
+        # "statement_cache_size": 0,  # (opcional) desactiva caché si ves rarezas
+    },
 )
 
 # Fábrica de sesiones
