@@ -1,4 +1,5 @@
 # backend/main.py
+import asyncio
 from datetime import date, datetime, timedelta, timezone
 from http import HTTPStatus
 from typing import Dict, List, Optional, Tuple
@@ -12,6 +13,7 @@ from database import create_db_and_tables, get_session # Importar funciones de d
 from sqlalchemy.ext.asyncio import AsyncSession # Importar AsyncSession
 from sqlalchemy.exc import IntegrityError
 import logging
+from anyio import to_thread
 
 from sqlmodel import Session, select
 import torch
@@ -158,6 +160,15 @@ except Exception as e_general:
     traceback.print_exc()
     model = None
 
+
+def _infer_sync(model, image_tensor, CLASSES):
+    with torch.no_grad():
+        outputs = model(image_tensor)
+        probabilities = torch.softmax(outputs, dim=1)[0]
+        idx = int(torch.argmax(probabilities).item())
+        return CLASSES[idx], float(probabilities[idx].item())
+
+
 # --- CONFIGURAR FastAPI ---
 app = FastAPI()
 app.add_middleware(
@@ -208,7 +219,7 @@ async def register_user(
 
     try:
         session.add(new_trabajador)
-        await session.commit()
+        await commit_with_retry(session)
         await session.refresh(new_trabajador)
         return new_trabajador
     except IntegrityError:
@@ -257,74 +268,73 @@ async def login_user(
     return {"message": "Inicio de sesión exitoso", "trabajador_id": trabajador.trabajador_id}
 
 
-# --- ENDPOINT DE PREDICCIÓN ---
 @app.post("/predict/")
 async def predict_stress(
     file: UploadFile = File(...),
-    # Añadir sesion_id como un parámetro de formulario, ya que es necesario para la DB
     sesion_id: int = Form(...),
-    # También inyectar la sesión de base de datos
     session: AsyncSession = Depends(get_session)
 ):
     if model is None:
-        print("Intento de predicción pero el modelo PyTorch no está cargado.")
         raise HTTPException(status_code=500, detail="El modelo de inferencia no está disponible.")
 
     if not file.content_type.startswith('image/'):
         raise HTTPException(status_code=400, detail="El archivo subido debe ser una imagen.")
 
+    # 1) leer y preparar imagen
     contents = await file.read()
     try:
         image_pil = Image.open(BytesIO(contents)).convert("RGB")
     except Exception as e:
-        print(f"Error al abrir la imagen con PIL: {e}")
         raise HTTPException(status_code=400, detail=f"No se pudo abrir o procesar la imagen: {e}")
 
+    image_tensor = transform(image_pil).unsqueeze(0)
+    device = next(model.parameters()).device  # CPU
+    image_tensor = image_tensor.to(device)
+
+    # 2) inferencia en hilo (no bloquea el event loop)
+    predicted_class_name, confidence = await to_thread.run_sync(
+        _infer_sync, model, image_tensor, CLASSES
+    )
+
+    # 3) guardar en DB con retry
     try:
-        image_tensor = transform(image_pil) # Aplicar transformaciones de torchvision
-        image_tensor = image_tensor.unsqueeze(0) # Añadir dimensión de batch
-
-        # Mover tensor al dispositivo del modelo (CPU en este caso)
-        device = next(model.parameters()).device # Obtener dispositivo del modelo
-        image_tensor = image_tensor.to(device)
-
-        with torch.no_grad():
-            outputs = model(image_tensor) # Predicción directa con el nn.Module
-            probabilities = torch.softmax(outputs, dim=1)[0]
-            
-            # Obtener el índice de la clase con la probabilidad más alta
-            _, predicted_idx_tensor = torch.max(outputs, 1)
-            predicted_class_name = CLASSES[predicted_idx_tensor.item()] # Usar tu lista CLASSES
-            confidence = probabilities[predicted_idx_tensor.item()].item()
-
-        # --- GUARDAR LECTURA INDIVIDUAL EN LA BASE DE DATOS ---
-        # Obtener la hora actual en UTC y hacerla timezone-aware
         current_utc_time = datetime.now(timezone.utc)
-
         lectura_individual = LecturaEstres(
-            sesion_id=sesion_id, # Usar el ID de sesión recibido
+            sesion_id=sesion_id,
             prediccion=predicted_class_name,
             confianza=round(confidence, 4),
-            timestamp_lectura=current_utc_time, # Usar la hora UTC timezone-aware
-            created_at=current_utc_time, # Establecer created_at manualmente
-            updated_at=current_utc_time # Establecer updated_at manualmente
+            timestamp_lectura=current_utc_time,
+            created_at=current_utc_time,
+            updated_at=current_utc_time
         )
         session.add(lectura_individual)
-        await session.commit()
-        await session.refresh(lectura_individual) # Refrescar para obtener el ID generado
+        await commit_with_retry(session)
+        await session.refresh(lectura_individual)
 
     except Exception as e:
-        print(f"Error durante la inferencia o guardado en DB: {e}")
-        import traceback
-        traceback.print_exc()
+        # log opcional aquí
         raise HTTPException(status_code=500, detail=f"Error durante el procesamiento o guardado: {e}")
 
     return JSONResponse(content={
         "prediction": predicted_class_name,
         "confidence": round(confidence, 4),
-        "lectura_estres_id": lectura_individual.lectura_estres_id # Devolver el ID del registro
+        "lectura_estres_id": lectura_individual.lectura_estres_id
     })
 
+
+async def commit_with_retry(session, attempts=3):
+    backoff = 0.5
+    for i in range(attempts):
+        try:
+            await commit_with_retry(session)
+            return
+        except (asyncio.TimeoutError, Exception) as e:
+            # si es el último intento -> relanza
+            if i == attempts - 1:
+                await session.rollback()
+                raise
+            await asyncio.sleep(backoff)
+            backoff *= 2  # exponencial
 
 
 @app.post("/sessions/start/", response_model=Sesion)
@@ -344,7 +354,7 @@ async def start_session(
     )
     try:
         session.add(new_session)
-        await session.commit()
+        await commit_with_retry(session)
         await session.refresh(new_session)
         return new_session
     except Exception as e:
@@ -392,7 +402,7 @@ async def end_session(
 
     try:
         session.add(db_session) # Add para que SQLAlchemy detecte los cambios
-        await session.commit()
+        await commit_with_retry(session)
         await session.refresh(db_session)
         return db_session
     except Exception as e:
@@ -952,7 +962,7 @@ async def create_cuestionario(
 
     try:
         session.add(new_cuestionario)
-        await session.commit()
+        await commit_with_retry(session)
         await session.refresh(new_cuestionario)
         return new_cuestionario
     except Exception as e:
