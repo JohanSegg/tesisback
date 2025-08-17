@@ -12,7 +12,7 @@ load_dotenv()
 # Lee la URL desde env (con fallback local)
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql+asyncpg://postgres:root@localhost:5433/postgres"
+    ""
 )
 
 # NOTA SSL:
