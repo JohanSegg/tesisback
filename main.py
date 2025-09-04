@@ -7,6 +7,7 @@ from fastapi import FastAPI, File, Form, Path, Query, UploadFile, HTTPException,
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+import httpx
 from pydantic import BaseModel, Field
 from database import create_db_and_tables, get_session # Importar funciones de database.py
 from sqlalchemy.ext.asyncio import AsyncSession # Importar AsyncSession
@@ -23,24 +24,18 @@ import sys
 
 from models import Trabajador, LecturaEstres, Sesion, Cuestionario
 
+# MODEL_SERVER_URL = "http://127.0.0.1:8001/predict/"
+MODEL_SERVER_URL = "https://yamathe5-tesis-modelo.hf.space/predict/"
+
+
 # QUITAR IMPORTACIONES DE FASTAI SI SOLO CARGAMOS UN nn.Module
 # from fastai.vision.all import load_learner, PILImage # << YA NO LAS NECESITAMOS (probablemente)
 
 # --- CONFIGURACIÓN ---
-MODEL_DIR = os.path.dirname(__file__)
 # Corregir el path para que no tenga "./" extra, aunque debería funcionar igual
-MODEL_PATH = os.path.join(MODEL_DIR, "stress.pth")
 # O más simple si stress.pth está junto a main.py:
 # MODEL_PATH = "stress.pth" # O os.path.join(os.path.dirname(__file__), "stress.pth")
 
-CLASSES = ["No Estrés", "Estrés"]
-
-# Las transformaciones de torchvision ahora serán CLAVE
-transform = transforms.Compose([
-    transforms.Resize((224, 224)), # Asegúrate que esto coincida con el entrenamiento
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # Y esto también
-])
 
 
 class UserCreate(BaseModel):
@@ -125,38 +120,38 @@ class CuestionarioCreate(BaseModel):
     dificultad_concentracion: Optional[int] = None
 
 
-# --- CARGAR EL MODELO (AHORA ASUMIENDO UN nn.Module DE PYTORCH) ---
-model = None # 'model' será el nn.Module
-try:
-    print(f"Intentando cargar el modelo PyTorch (nn.Module) desde: {MODEL_PATH}")
-    # map_location para asegurar que se carga en CPU.
-    model = torch.load(MODEL_PATH, map_location=torch.device('cpu'), weights_only=False)
+# # --- CARGAR EL MODELO (AHORA ASUMIENDO UN nn.Module DE PYTORCH) ---
+# model = None # 'model' será el nn.Module
+# try:
+#     print(f"Intentando cargar el modelo PyTorch (nn.Module) desde: {MODEL_PATH}")
+#     # map_location para asegurar que se carga en CPU.
+#     model = torch.load(MODEL_PATH, map_location=torch.device('cpu'), weights_only=False)
 
-    # Verificar si el objeto cargado es realmente un nn.Module
-    if not isinstance(model, torch.nn.Module):
-        raise TypeError(f"El archivo cargado no es un nn.Module. Tipo encontrado: {type(model)}")
+#     # Verificar si el objeto cargado es realmente un nn.Module
+#     if not isinstance(model, torch.nn.Module):
+#         raise TypeError(f"El archivo cargado no es un nn.Module. Tipo encontrado: {type(model)}")
 
-    model.eval() # Poner el modelo en modo evaluación
-    print(f"Modelo PyTorch (nn.Module) cargado exitosamente desde {MODEL_PATH}")
+#     model.eval() # Poner el modelo en modo evaluación
+#     print(f"Modelo PyTorch (nn.Module) cargado exitosamente desde {MODEL_PATH}")
 
-except FileNotFoundError:
-     print(f"ERROR CRÍTICO - MODELO NO ENCONTRADO: {MODEL_PATH}")
-     model = None
-except ModuleNotFoundError as e_module:
-    print(f"ERROR CRÍTICO - MODULO FALTANTE AL CARGAR MODELO: {e_module}")
-    print("Esto significa que la definición de alguna capa o clase en tu modelo guardado no se encuentra.")
-    print("Asegúrate de tener todas las bibliotecas necesarias (incluida fastai si alguna capa es de fastai).")
-    model = None  
-except RuntimeError as e_runtime:
-    print(f"ERROR CRÍTICO - RUNTIME ERROR AL CARGAR MODELO: {e_runtime}")
-    import traceback
-    traceback.print_exc()
-    model = None
-except Exception as e_general:
-    print(f"ERROR CRÍTICO - ERROR GENERAL AL CARGAR MODELO: {e_general}")
-    import traceback
-    traceback.print_exc()
-    model = None
+# except FileNotFoundError:
+#      print(f"ERROR CRÍTICO - MODELO NO ENCONTRADO: {MODEL_PATH}")
+#      model = None
+# except ModuleNotFoundError as e_module:
+#     print(f"ERROR CRÍTICO - MODULO FALTANTE AL CARGAR MODELO: {e_module}")
+#     print("Esto significa que la definición de alguna capa o clase en tu modelo guardado no se encuentra.")
+#     print("Asegúrate de tener todas las bibliotecas necesarias (incluida fastai si alguna capa es de fastai).")
+#     model = None  
+# except RuntimeError as e_runtime:
+#     print(f"ERROR CRÍTICO - RUNTIME ERROR AL CARGAR MODELO: {e_runtime}")
+#     import traceback
+#     traceback.print_exc()
+#     model = None
+# except Exception as e_general:
+#     print(f"ERROR CRÍTICO - ERROR GENERAL AL CARGAR MODELO: {e_general}")
+#     import traceback
+#     traceback.print_exc()
+#     model = None
 
 # --- CONFIGURAR FastAPI ---
 app = FastAPI()
@@ -261,68 +256,70 @@ async def login_user(
 @app.post("/predict/")
 async def predict_stress(
     file: UploadFile = File(...),
-    # Añadir sesion_id como un parámetro de formulario, ya que es necesario para la DB
     sesion_id: int = Form(...),
-    # También inyectar la sesión de base de datos
     session: AsyncSession = Depends(get_session)
 ):
-    if model is None:
-        print("Intento de predicción pero el modelo PyTorch no está cargado.")
-        raise HTTPException(status_code=500, detail="El modelo de inferencia no está disponible.")
-
+    """
+    Este endpoint ahora actúa como un proxy:
+    1. Recibe la imagen y los datos de la sesión.
+    2. Reenvía la imagen al microservicio del modelo.
+    3. Recibe la predicción y la guarda en la base de datos.
+    """
     if not file.content_type.startswith('image/'):
         raise HTTPException(status_code=400, detail="El archivo subido debe ser una imagen.")
 
     contents = await file.read()
+    
+    # Preparamos los datos para enviar al servidor del modelo
+    files = {'file': (file.filename, contents, file.content_type)}
+    
+    prediction_data = None
     try:
-        image_pil = Image.open(BytesIO(contents)).convert("RGB")
-    except Exception as e:
-        print(f"Error al abrir la imagen con PIL: {e}")
-        raise HTTPException(status_code=400, detail=f"No se pudo abrir o procesar la imagen: {e}")
-
-    try:
-        image_tensor = transform(image_pil) # Aplicar transformaciones de torchvision
-        image_tensor = image_tensor.unsqueeze(0) # Añadir dimensión de batch
-
-        # Mover tensor al dispositivo del modelo (CPU en este caso)
-        device = next(model.parameters()).device # Obtener dispositivo del modelo
-        image_tensor = image_tensor.to(device)
-
-        with torch.no_grad():
-            outputs = model(image_tensor) # Predicción directa con el nn.Module
-            probabilities = torch.softmax(outputs, dim=1)[0]
+        # Usamos httpx.AsyncClient para hacer la llamada asíncrona
+        async with httpx.AsyncClient() as client:
+            response = await client.post(MODEL_SERVER_URL, files=files, timeout=10.0)
             
-            # Obtener el índice de la clase con la probabilidad más alta
-            _, predicted_idx_tensor = torch.max(outputs, 1)
-            predicted_class_name = CLASSES[predicted_idx_tensor.item()] # Usar tu lista CLASSES
-            confidence = probabilities[predicted_idx_tensor.item()].item()
+            # Levantar un error si el servidor del modelo respondió con un código de error (4xx o 5xx)
+            response.raise_for_status() 
+            
+            prediction_data = response.json()
+            predicted_class_name = prediction_data.get("prediction")
+            confidence = prediction_data.get("confidence")
 
-        # --- GUARDAR LECTURA INDIVIDUAL EN LA BASE DE DATOS ---
-        # Obtener la hora actual en UTC y hacerla timezone-aware
+    except httpx.ConnectError as e:
+        print(f"Error de conexión al servidor del modelo: {e}")
+        raise HTTPException(status_code=503, detail="No se pudo conectar con el servicio de predicción.")
+    except httpx.HTTPStatusError as e:
+        # Si el servidor del modelo devuelve un error, lo pasamos al cliente
+        print(f"Error del servidor del modelo: {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"Error en el servicio de predicción: {e.response.json().get('detail', e.response.text)}")
+    except Exception as e:
+        print(f"Error inesperado al llamar al modelo: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al procesar la predicción.")
+
+    # --- GUARDAR LECTURA INDIVIDUAL EN LA BASE DE DATOS (Lógica sin cambios) ---
+    try:
         current_utc_time = datetime.now(timezone.utc)
-
         lectura_individual = LecturaEstres(
-            sesion_id=sesion_id, # Usar el ID de sesión recibido
+            sesion_id=sesion_id,
             prediccion=predicted_class_name,
             confianza=round(confidence, 4),
-            timestamp_lectura=current_utc_time, # Usar la hora UTC timezone-aware
-            created_at=current_utc_time, # Establecer created_at manualmente
-            updated_at=current_utc_time # Establecer updated_at manualmente
+            timestamp_lectura=current_utc_time,
+            created_at=current_utc_time,
+            updated_at=current_utc_time
         )
         session.add(lectura_individual)
         await session.commit()
-        await session.refresh(lectura_individual) # Refrescar para obtener el ID generado
-
+        await session.refresh(lectura_individual)
+    
     except Exception as e:
-        print(f"Error durante la inferencia o guardado en DB: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error durante el procesamiento o guardado: {e}")
+        print(f"Error al guardar la lectura en la base de datos: {e}")
+        raise HTTPException(status_code=500, detail="La predicción se realizó pero no se pudo guardar en la base de datos.")
 
     return JSONResponse(content={
         "prediction": predicted_class_name,
         "confidence": round(confidence, 4),
-        "lectura_estres_id": lectura_individual.lectura_estres_id # Devolver el ID del registro
+        "lectura_estres_id": lectura_individual.lectura_estres_id
     })
 
 
