@@ -100,6 +100,16 @@ class DailyStressSummary(BaseModel):
     duracion_total_grabacion_segundos: Optional[float] = None
     numero_sesiones: int
     
+class TrabajadorUpdate(BaseModel):
+    nombre: Optional[str] = None
+    fecha_de_nacimiento: Optional[date] = None
+    genero: Optional[str] = None
+    estado_civil: Optional[str] = None
+    uso_de_anteojos: Optional[bool] = None
+    estudio_y_trabajo: Optional[str] = None
+    horas_trabajo_semanal: Optional[int] = None
+    horas_descanso_dia: Optional[int] = None
+
 class MonthlyOverallSummary(BaseModel):
     trabajador_id: int
     month: int
@@ -612,6 +622,79 @@ async def get_session_summaries_by_date_range(
         summaries.append(summary)
 
     return summaries
+
+
+@app.get("/trabajadores/{trabajador_id}/", response_model=TrabajadorPublic, summary="Obtener un trabajador por su ID")
+async def get_trabajador_by_id(
+    trabajador_id: int,
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Obtiene y devuelve los datos públicos de un trabajador específico por su ID.
+    """
+    statement = select(Trabajador).where(Trabajador.trabajador_id == trabajador_id)
+    result = await session.execute(statement)
+    trabajador = result.scalars().first()
+
+    if not trabajador:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trabajador no encontrado."
+        )
+    
+    return trabajador
+
+
+@app.put("/trabajadores/{trabajador_id}/", response_model=TrabajadorPublic, summary="Actualizar perfil de un trabajador")
+async def update_trabajador_profile(
+    trabajador_id: int,
+    update_data: TrabajadorUpdate,
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Actualiza los datos del perfil de un trabajador específico.
+    
+    Este endpoint permite una actualización parcial. Solo los campos
+    proporcionados en el cuerpo de la solicitud serán actualizados.
+    El 'username' no puede ser modificado.
+    """
+    # 1. Buscar al trabajador en la base de datos por su ID
+    statement = select(Trabajador).where(Trabajador.trabajador_id == trabajador_id)
+    result = await session.execute(statement)
+    db_trabajador = result.scalars().first()
+
+    # Si no se encuentra el trabajador, devolver un error 404
+    if not db_trabajador:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trabajador no encontrado."
+        )
+
+    # 2. Actualizar los campos del objeto trabajador
+    # model_dump(exclude_unset=True) crea un diccionario solo con los
+    # campos que el cliente envió, ignorando los que quedaron en None.
+    update_data_dict = update_data.model_dump(exclude_unset=True)
+
+    for key, value in update_data_dict.items():
+        # setattr() actualiza el atributo del objeto dinámicamente
+        setattr(db_trabajador, key, value)
+        
+    # 3. Actualizar la marca de tiempo de 'updated_at'
+    db_trabajador.updated_at = datetime.now(timezone.utc)
+
+    try:
+        # 4. Guardar los cambios en la base de datos
+        session.add(db_trabajador)
+        await session.commit()
+        await session.refresh(db_trabajador)
+        return db_trabajador
+    except Exception as e:
+        await session.rollback()
+        print(f"Error al actualizar el perfil del trabajador {trabajador_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Ocurrió un error interno al actualizar el perfil."
+        )
 
 
 @app.get(
