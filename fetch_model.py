@@ -1,8 +1,8 @@
 # fetch_model.py
 import os, sys, requests
 
-MODEL_URL = os.getenv("MODEL_URL")
-MODEL_PATH = os.getenv("MODEL_PATH", "stress.pth")
+MODEL_URL = os.getenv("MODEL_URL") # url externa
+MODEL_PATH = os.getenv("MODEL_PATH", "stress.pth") #ruta local
 
 if not MODEL_URL:
     print("MODEL_URL no está definido. Saliendo.")
@@ -15,7 +15,7 @@ if os.path.exists(MODEL_PATH):
 print(f"Descargando modelo desde {MODEL_URL} -> {MODEL_PATH}")
 with requests.get(MODEL_URL, stream=True, timeout=300) as r:
     r.raise_for_status()
-    with open(MODEL_PATH, "wb") as f:
+    with open(MODEL_PATH, "wb") as f:  # Colocar archivo de MODEL_URL en MODEL_PATH (transladar archivo)
         for chunk in r.iter_content(chunk_size=8192):
             if chunk:
                 f.write(chunk)
