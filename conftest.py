@@ -1,4 +1,5 @@
-# tests/conftest.py
+# conftest.py
+# Entorno de pruebas para la BD.
 
 import pytest
 import pytest_asyncio
@@ -10,45 +11,39 @@ from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
 from fastapi.testclient import TestClient
 
-# Importa tu aplicación FastAPI y la función get_session
+# Importa la aplicacion fastapi (app) y la funcion get_session
 from main import app
 from main import get_session
+from models import Trabajador # Importa modelo "trabajador" para crear datos de prueba
 
-
-from models import Trabajador # Importamos un modelo para crear datos de prueba
-
-# Usamos una base de datos en memoria para las pruebas, es más rápido y se aísla.
-# NOTA: SQLite en memoria no soporta todas las características de PostgreSQL.
-# Para pruebas más complejas, se podría usar una base de datos PostgreSQL de prueba.
+# Base de datos temporal en memoria para las pruebas.
 TEST_DATABASE_URL = "sqlite+aiosqlite:///./test.db"
 
 engine = create_async_engine(TEST_DATABASE_URL, echo=True, future=True)
 async_session_factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
-# Esta es una dependencia de sesión SOBREESCRITA para usar la base de datos de prueba
+# Esta es una dependencia de sesión que se sobreescribe para usar la base de datos de prueba
 async def override_get_session() -> AsyncGenerator[AsyncSession, None]:
     async with async_session_factory() as session:
         yield session
 
-# Sobreescribimos la dependencia en nuestra aplicación
-app.dependency_overrides[get_session] = override_get_session
-
+app.dependency_overrides[get_session] = override_get_session # reemplaza la dependencia en app de main.py
 
 @pytest_asyncio.fixture(scope="function")
 async def db_session() -> AsyncGenerator[AsyncSession, None]:
     """
-    Fixture que crea y limpia la base de datos para cada función de prueba.
+    Fixture (funcion) que crea y limpia la BD para cada función de prueba.
     """
-    # Crear todas las tablas antes de la prueba
+    # Crear todas las tablas de la BD antes de la prueba
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
     
-    # Proporcionar la sesión a la prueba
+    # delega la sesion 
     async with async_session_factory() as session:
         yield session
     
-    # Limpiar la base de datos después de la prueba
+    # Limpia la BD luego de la prueba
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.drop_all)
 
