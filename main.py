@@ -1,42 +1,53 @@
-# backend/main.py
+# main.py
 from datetime import date, datetime, timedelta, timezone
 from http import HTTPStatus
 from typing import Dict, List, Optional, Tuple
 import bcrypt
-from fastapi import FastAPI, File, Form, Path, Query, UploadFile, HTTPException, Depends, status # Importar Depends
+import httpx
+
+# Fastapi
+from fastapi import FastAPI, File, Form, Path, Query, UploadFile, HTTPException, Depends, status 
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-import httpx
-from pydantic import BaseModel,  Field
+
+
+# BD
 from database import create_db_and_tables, get_session # Importar funciones de database.py
+from models import Trabajador, LecturaEstres, Sesion, Cuestionario #Importa models y sus entidades
 from sqlalchemy.ext.asyncio import AsyncSession # Importar AsyncSession
 from sqlalchemy.exc import IntegrityError
+from sqlmodel import Session, select
+from pydantic import BaseModel, Field
 import logging
 
-from sqlmodel import Session, select
+# Modelo DL y preprocesamiento de imagenes
 import torch
-from torchvision import transforms # Seguiremos usando esto para el preprocesamiento
+from torchvision import transforms 
 from PIL import Image
 from io import BytesIO
 import os
 import sys
 
-from models import Trabajador, LecturaEstres, Sesion, Cuestionario
+
+
 
 # MODEL_SERVER_URL = "http://127.0.0.1:8001/predict/"
 MODEL_SERVER_URL = "https://yamathe5-tesis-modelo.hf.space/predict/"
 
 
-# QUITAR IMPORTACIONES DE FASTAI SI SOLO CARGAMOS UN nn.Module
-# from fastai.vision.all import load_learner, PILImage # << YA NO LAS NECESITAMOS (probablemente)
+# --- CONFIGURACIÓN PARA DETECTAR EL MODELO ---
+#MODEL_DIR = os.path.dirname(__file__)
+#MODEL_PATH = os.path.join(MODEL_DIR, "stress.pth")
+#print(f"Tamaño del archivo: {os.path.getsize(MODEL_PATH)} bytes")
+# CLASSES = ["No Estrés", "Estrés"]
 
-# --- CONFIGURACIÓN ---
-# Corregir el path para que no tenga "./" extra, aunque debería funcionar igual
-# O más simple si stress.pth está junto a main.py:
-# MODEL_PATH = "stress.pth" # O os.path.join(os.path.dirname(__file__), "stress.pth")
-
-
+# Transformaciones con torchvision 
+#transform = transforms.Compose([
+#    transforms.Resize((224, 224)), # Cambiar resolucion
+#    transforms.ToTensor(),
+#    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # 
+#])
 
 class UserCreate(BaseModel):
     nombre: str
@@ -77,7 +88,7 @@ class SesionSummaryResponse(BaseModel): # O puedes usar Pydantic BaseModel si pr
     duracion_calculada_segundos: Optional[float] = None # Usamos float por si hay fracciones de segundo
     porcentaje_estres: Optional[float] = None
     total_lecturas: int
-    cuestionario: Optional[Cuestionario] = None # <-- CAMPO AÑADIDO
+    cuestionario: Optional[Cuestionario] = None 
 
 
 class UserLogin(BaseModel):
@@ -129,40 +140,41 @@ class CuestionarioCreate(BaseModel):
     molestias_fisicas_visual: Optional[int] = None
     molestias_fisicas_otros: Optional[int] = None
     dificultad_concentracion: Optional[int] = None
+    
+'''
+# --- CARGAR EL MODELO ---
+model = None # modelo personalizado que hereda nn.module
+try:
+    print(f"Intentando cargar el modelo PyTorch (nn.Module) desde: {MODEL_PATH}")
+    # map_location para asegurar que se carga en CPU.
+    model = torch.load(MODEL_PATH, map_location=torch.device('cpu'), weights_only=False)
 
+    # Verificar si el objeto cargado es un modelo
+    if not isinstance(model, torch.nn.Module):
+        raise TypeError(f"El archivo cargado no es un nn.Module. Tipo encontrado: {type(model)}")
 
-# # --- CARGAR EL MODELO (AHORA ASUMIENDO UN nn.Module DE PYTORCH) ---
-# model = None # 'model' será el nn.Module
-# try:
-#     print(f"Intentando cargar el modelo PyTorch (nn.Module) desde: {MODEL_PATH}")
-#     # map_location para asegurar que se carga en CPU.
-#     model = torch.load(MODEL_PATH, map_location=torch.device('cpu'), weights_only=False)
+    model.eval() # Poner modo evaluación
+    print(f"Modelo PyTorch (nn.Module) cargado exitosamente desde {MODEL_PATH}")
 
-#     # Verificar si el objeto cargado es realmente un nn.Module
-#     if not isinstance(model, torch.nn.Module):
-#         raise TypeError(f"El archivo cargado no es un nn.Module. Tipo encontrado: {type(model)}")
-
-#     model.eval() # Poner el modelo en modo evaluación
-#     print(f"Modelo PyTorch (nn.Module) cargado exitosamente desde {MODEL_PATH}")
-
-# except FileNotFoundError:
-#      print(f"ERROR CRÍTICO - MODELO NO ENCONTRADO: {MODEL_PATH}")
-#      model = None
-# except ModuleNotFoundError as e_module:
-#     print(f"ERROR CRÍTICO - MODULO FALTANTE AL CARGAR MODELO: {e_module}")
-#     print("Esto significa que la definición de alguna capa o clase en tu modelo guardado no se encuentra.")
-#     print("Asegúrate de tener todas las bibliotecas necesarias (incluida fastai si alguna capa es de fastai).")
-#     model = None  
-# except RuntimeError as e_runtime:
-#     print(f"ERROR CRÍTICO - RUNTIME ERROR AL CARGAR MODELO: {e_runtime}")
-#     import traceback
-#     traceback.print_exc()
-#     model = None
-# except Exception as e_general:
-#     print(f"ERROR CRÍTICO - ERROR GENERAL AL CARGAR MODELO: {e_general}")
-#     import traceback
-#     traceback.print_exc()
-#     model = None
+except FileNotFoundError:
+     print(f"ERROR CRÍTICO - MODELO NO ENCONTRADO: {MODEL_PATH}")
+     model = None
+except ModuleNotFoundError as e_module:
+    print(f"ERROR CRÍTICO - MODULO FALTANTE AL CARGAR MODELO: {e_module}")
+    print("Esto significa que la definición de alguna capa o clase en tu modelo guardado no se encuentra.")
+    print("Asegúrate de tener todas las bibliotecas necesarias (incluida fastai si alguna capa es de fastai).")
+    model = None  
+except RuntimeError as e_runtime:
+    print(f"ERROR CRÍTICO - RUNTIME ERROR AL CARGAR MODELO: {e_runtime}")
+    import traceback
+    traceback.print_exc()
+    model = None
+except Exception as e_general:
+    print(f"ERROR CRÍTICO - ERROR GENERAL AL CARGAR MODELO: {e_general}")
+    import traceback
+    traceback.print_exc()
+    model = None
+'''
 
 # --- CONFIGURAR FastAPI ---
 app = FastAPI()
@@ -174,12 +186,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Inicializar el backend
 @app.on_event("startup")
 async def on_startup():
     print("Iniciando aplicación FastAPI...")
     await create_db_and_tables()
     print("Tablas de la base de datos verificadas/creadas.")
-    
     
     
     
@@ -1088,8 +1100,8 @@ async def create_cuestionario(
         )
 
 
-
-
+# Desplegar la aplicacion usando uvicorn como servidor ASGI
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
