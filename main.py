@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel,  Field
 from database import create_db_and_tables, get_session # Importar funciones de database.py
 from sqlalchemy.ext.asyncio import AsyncSession # Importar AsyncSession
 from sqlalchemy.exc import IntegrityError
@@ -41,6 +41,7 @@ MODEL_SERVER_URL = "https://yamathe5-tesis-modelo.hf.space/predict/"
 class UserCreate(BaseModel):
     nombre: str
     username: str
+    correo: str
     password: str
     fecha_de_nacimiento: Optional[date] = None
     genero: Optional[str] = None
@@ -199,6 +200,7 @@ async def register_user(
     new_trabajador = Trabajador(
         nombre=user_data.nombre,
         username=user_data.username,
+        correo=user_data.correo.strip().lower(),  # ✅ normalizado
         password=hashed_password, # Almacenar la contraseña hasheada
         fecha_de_nacimiento=user_data.fecha_de_nacimiento,
         genero=user_data.genero,
@@ -216,12 +218,17 @@ async def register_user(
         await session.commit()
         await session.refresh(new_trabajador)
         return new_trabajador
-    except IntegrityError:
-        # Este bloque se ejecutará si la restricción 'unique=True' del username falla.
+    except IntegrityError as e:
         await session.rollback()
+        if "username" in str(e.orig):
+            detail = "El nombre de usuario o correo ya existe."
+        elif "correo" in str(e.orig):
+            detail = "El nombre de usuario o correo ya existe."
+        else:
+            detail = e
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="El nombre de usuario ya existe. Por favor, elige otro."
+            detail=detail
         )
     except Exception as e:
         # Captura cualquier otro error inesperado durante la creación.
@@ -407,6 +414,42 @@ async def end_session(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail="Error al finalizar la sesión de grabación.")
+# --- NUEVO ENDPOINT: Eliminar una sesión (delete lógico) ---
+@app.delete("/sessions/{sesion_id}/delete", response_model=Sesion)
+async def delete_session(
+    sesion_id: int = Path(..., description="ID de la sesión a eliminar"),
+    session: AsyncSession = Depends(get_session)
+):
+    current_utc_time = datetime.now(timezone.utc)
+    statement = select(Sesion).where(Sesion.sesion_id == sesion_id)
+    result = await session.execute(statement)
+    db_session = result.scalars().first()
+
+    if not db_session:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail="Sesión no encontrada."
+        )
+
+    # Marcamos solo como Eliminado
+    db_session.estado_grabacion = "Eliminado"
+    db_session.updated_at = current_utc_time
+
+    try:
+        session.add(db_session)
+        await session.commit()
+        await session.refresh(db_session)
+        return db_session
+    except Exception as e:
+        print(f"Error al eliminar sesión {sesion_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail="Error al eliminar la sesión."
+        )
+
+
 
 @app.get("/trabajadores/")
 async def get_all_trabajadores(session: AsyncSession = Depends(get_session)): # Usar AsyncSession
@@ -576,7 +619,8 @@ async def get_session_summaries_by_date_range(
         .where(
             Sesion.trabajador_id == trabajador_id,
             Sesion.fecha_sesion >= start_date_to_use,
-            Sesion.fecha_sesion <= end_date_to_use
+            Sesion.fecha_sesion <= end_date_to_use,
+            Sesion.estado_grabacion != 'Eliminado',
         )
         .order_by(Sesion.fecha_sesion.desc(), Sesion.hora_inicio.desc())
     )

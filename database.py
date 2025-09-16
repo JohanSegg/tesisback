@@ -48,6 +48,7 @@ async_session_factory = sessionmaker(
 async def create_db_and_tables():
     print("Intentando crear tablas en la base de datos...")
     async with engine.begin() as conn:
+        # await conn.run_sync(SQLModel.metadata.drop_all)
         await conn.run_sync(SQLModel.metadata.create_all)
     print("Tablas verificadas/creadas en la base de datos.")
 

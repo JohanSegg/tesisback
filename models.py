@@ -15,6 +15,7 @@ class Trabajador(SQLModel, table=True):
     # Campos de la tabla 'trabajadores'
     nombre: str = Field(max_length=255, nullable=False)
     username: str = Field(max_length=100, nullable=False, unique=True)
+    correo: str = Field(max_length=100, nullable=False, unique=True)
     password: str = Field(max_length=255, nullable=False)
     fecha_de_nacimiento: Optional[date] = Field(default=None)
     genero: Optional[str] = Field(max_length=15, default=None)
