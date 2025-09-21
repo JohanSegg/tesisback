@@ -29,7 +29,7 @@ engine = create_async_engine(
         # Para asyncpg:
         "timeout": 30,           
         "command_timeout": 60,   
-        "ssl": "require",       # Fuerza SSL con asyncpg. Si falla, cambiar por True
+        "ssl": "require",       # Fuerza SSL con asyncpg. Si falla, cambiar "require" por "disable
         # "statement_cache_size": 0,  #  desactiva cache
     },
 )
@@ -53,4 +53,5 @@ async def create_db_and_tables():
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     async with async_session_factory() as session:
         yield session
+
 
