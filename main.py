@@ -288,45 +288,32 @@ async def predict_stress(
     sesion_id: int = Form(...),
     session: AsyncSession = Depends(get_session)
 ):
-    """
-    Este endpoint ahora actúa como un proxy:
-    1. Recibe la imagen y los datos de la sesión.
-    2. Reenvía la imagen al microservicio del modelo.
-    3. Recibe la predicción y la guarda en la base de datos.
-    """
     if not file.content_type.startswith('image/'):
         raise HTTPException(status_code=400, detail="El archivo subido debe ser una imagen.")
 
     contents = await file.read()
-    
-    # Preparamos los datos para enviar al servidor del modelo
+
+    # >>> AQUI: incluir sesion_id en los datos del form <<<
+    data = {'sesion_id': str(sesion_id)}
     files = {'file': (file.filename, contents, file.content_type)}
-    
-    prediction_data = None
+
     try:
-        # Usamos httpx.AsyncClient para hacer la llamada asíncrona
         async with httpx.AsyncClient() as client:
-            response = await client.post(MODEL_SERVER_URL, files=files, timeout=10.0)
-            
-            # Levantar un error si el servidor del modelo respondió con un código de error (4xx o 5xx)
-            response.raise_for_status() 
-            
+            response = await client.post(MODEL_SERVER_URL, data=data, files=files, timeout=10.0)
+            response.raise_for_status()
             prediction_data = response.json()
             predicted_class_name = prediction_data.get("prediction")
             confidence = prediction_data.get("confidence")
-
-    except httpx.ConnectError as e:
-        print(f"Error de conexión al servidor del modelo: {e}")
+            # (Opcional) Si quieres, extrae storage.gs_uri para guardarlo en tu BD
+            storage_info = prediction_data.get("storage", {})
+    except httpx.ConnectError:
         raise HTTPException(status_code=503, detail="No se pudo conectar con el servicio de predicción.")
     except httpx.HTTPStatusError as e:
-        # Si el servidor del modelo devuelve un error, lo pasamos al cliente
-        print(f"Error del servidor del modelo: {e.response.text}")
-        raise HTTPException(status_code=e.response.status_code, detail=f"Error en el servicio de predicción: {e.response.json().get('detail', e.response.text)}")
-    except Exception as e:
-        print(f"Error inesperado al llamar al modelo: {e}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"Error en el servicio de predicción: {e.response.text}")
+    except Exception:
         raise HTTPException(status_code=500, detail="Error interno al procesar la predicción.")
 
-    # --- GUARDAR LECTURA INDIVIDUAL EN LA BASE DE DATOS (Lógica sin cambios) ---
+    # Guardar lectura en la BD (como ya lo tienes)
     try:
         current_utc_time = datetime.now(timezone.utc)
         lectura_individual = LecturaEstres(
@@ -340,15 +327,15 @@ async def predict_stress(
         session.add(lectura_individual)
         await session.commit()
         await session.refresh(lectura_individual)
-    
-    except Exception as e:
-        print(f"Error al guardar la lectura en la base de datos: {e}")
+    except Exception:
         raise HTTPException(status_code=500, detail="La predicción se realizó pero no se pudo guardar en la base de datos.")
 
     return JSONResponse(content={
         "prediction": predicted_class_name,
         "confidence": round(confidence, 4),
-        "lectura_estres_id": lectura_individual.lectura_estres_id
+        "lectura_estres_id": lectura_individual.lectura_estres_id,
+        # (Opcional) expón info de Storage para trazabilidad/dataset
+        "storage": storage_info
     })
 
 
