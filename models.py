@@ -1,7 +1,10 @@
 # models.py
 from typing import Optional
+
+from sqlalchemy import UniqueConstraint,text
 from sqlmodel import Column, DateTime, Field, SQLModel
 from datetime import date, datetime, timezone
+from sqlalchemy import Column, DateTime
 
 # --- Tabla trabajadores ---
 class Trabajador(SQLModel, table=True):
@@ -23,6 +26,9 @@ class Trabajador(SQLModel, table=True):
     estudio_y_trabajo: Optional[str] = Field(max_length=255, default=None)
     horas_trabajo_semanal: Optional[int] = Field(default=None)
     horas_descanso_dia: Optional[int] = Field(default=None)
+    
+    role_id: Optional[int] = Field(default=1, foreign_key="roles.role_id")
+
 
     # created_at y updated_at se inicializan con la hora UTC actual.
     created_at: datetime = Field(
@@ -32,6 +38,29 @@ class Trabajador(SQLModel, table=True):
     updated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         sa_column=Column(DateTime(timezone=True), nullable=False) 
+    )
+
+class Rol(SQLModel, table=True):
+    __tablename__ = "roles"
+    role_id: Optional[int] = Field(default=None, primary_key=True)
+    nombre: str = Field(max_length=50, nullable=False, unique=True)
+
+
+class TrabajadorJefe(SQLModel, table=True):
+    __tablename__ = "trabajador_jefe"
+    # Relación: cada trabajador (subordinado) puede tener UN solo jefe
+    id: Optional[int] = Field(default=None, primary_key=True)
+    jefe_id: int = Field(foreign_key="trabajadores.trabajador_id")
+    trabajador_id: int = Field(foreign_key="trabajadores.trabajador_id")
+
+    # Un subordinado no puede estar duplicado en la relación
+    __table_args__ = (
+        UniqueConstraint("trabajador_id", name="uq_trabajador_tiene_un_solo_jefe"),
+    )
+
+    created_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
     )
 
 

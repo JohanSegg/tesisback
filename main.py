@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 # BD
 from database import create_db_and_tables, get_session # Importar funciones de database.py
-from models import Trabajador, LecturaEstres, Sesion, Cuestionario #Importa models y sus entidades
+from models import Trabajador, LecturaEstres, Sesion, Cuestionario, TrabajadorJefe #Importa models y sus entidades
 from sqlalchemy.ext.asyncio import AsyncSession # Importar AsyncSession
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
@@ -28,12 +28,16 @@ from PIL import Image
 from io import BytesIO
 import os
 import sys
+from sqlalchemy import delete, text
 
 
 
 
 # MODEL_SERVER_URL = "http://127.0.0.1:8001/predict/"
-MODEL_SERVER_URL = "https://yamathe5-tesis-modelo.hf.space/predict/"
+MODEL_SERVER_URL = os.getenv(
+    "MODEL_SERVER_URL",
+    "http://127.0.0.1:8001/predict/"  # opcional: valor por defecto
+)
 
 
 # --- CONFIGURACIÓN PARA DETECTAR EL MODELO ---
@@ -62,6 +66,40 @@ class UserCreate(BaseModel):
     horas_trabajo_semanal: Optional[int] = None
     horas_descanso_dia: Optional[int] = None
     
+    
+class AdminRoleUpdate(BaseModel):
+    role_id: int  # 1=Usuario, 2=Admin, 3=Jefe
+
+class AsignacionCreate(BaseModel):
+    jefe_id: int
+    subordinado_ids: List[int]
+
+class AsignacionDelete(BaseModel):
+    jefe_id: int
+    subordinado_id: int
+
+
+class TrabajadorBasic(BaseModel):
+    trabajador_id: int
+    nombre: str
+    username: str
+    role_id: Optional[int] = None  # ✅ acepta None
+
+class TrabajadorPublic(BaseModel):
+    trabajador_id: int
+    nombre: str
+    username: str
+    fecha_de_nacimiento: Optional[date] = None
+    genero: Optional[str] = None
+    estado_civil: Optional[str] = None
+    uso_de_anteojos: Optional[bool] = None
+    estudio_y_trabajo: Optional[str] = None
+    horas_trabajo_semanal: Optional[int] = None
+    horas_descanso_dia: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+
+
 # main.py
 
 class TrabajadorPublic(BaseModel):
@@ -1085,6 +1123,339 @@ async def create_cuestionario(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error interno al guardar el cuestionario."
         )
+
+
+
+@app.get("/cuestionarios/", response_model=List[Cuestionario], summary="Obtener todos los cuestionarios")
+async def get_all_cuestionarios(
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Obtiene y devuelve una lista de todos los cuestionarios registrados en la base de datos.
+    """
+    try:
+        # Crea una sentencia para seleccionar todos los registros de la tabla 'cuestionarios'
+        statement = select(Cuestionario).order_by(Cuestionario.created_at.desc()) # Opcional: ordenar por más reciente
+        
+        # Ejecuta la sentencia de forma asíncrona
+        results = await session.execute(statement)
+        
+        # Obtiene todos los objetos Cuestionario
+        cuestionarios = results.scalars().all()
+        
+        return cuestionarios
+        
+    except Exception as e:
+        # Manejo de errores genérico
+        print(f"Error al obtener cuestionarios: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail="Ocurrió un error al intentar obtener la lista de cuestionarios."
+        )
+
+@app.delete("/sessions/{sesion_id}/", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(
+    sesion_id: int = Path(..., description="ID de la sesión a eliminar"),
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Elimina una sesión y sus datos asociados (lecturas y cuestionario).
+    Si tu BD ya tiene ON DELETE CASCADE, puedes omitir los deletes de dependientes.
+    """
+    try:
+        # 1) Verificar existencia
+        stmt = select(Sesion).where(Sesion.sesion_id == sesion_id)
+        res = await session.execute(stmt)
+        sesion_obj = res.scalars().first()
+        if not sesion_obj:
+            raise HTTPException(status_code=HTTPStatus.NOT_FOUND,
+                                detail=f"La sesión con ID {sesion_id} no fue encontrada.")
+
+        # 2) Borrar dependientes (si no hay CASCADE en la BD)
+        await session.execute(delete(LecturaEstres).where(LecturaEstres.sesion_id == sesion_id))
+        await session.execute(delete(Cuestionario).where(Cuestionario.sesion_id == sesion_id))
+
+        # 3) Borrar la sesión
+        await session.delete(sesion_obj)
+        await session.commit()
+
+        # 204 No Content (sin body)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        await session.rollback()
+        print(f"Error al eliminar la sesión {sesion_id}: {e}")
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                            detail="Error interno al intentar eliminar la sesión.")
+
+
+@app.post(
+    "/cuestionarios/", 
+    response_model=Cuestionario, 
+    status_code=status.HTTP_201_CREATED,
+    summary="Crear un nuevo cuestionario para una sesión"
+)
+async def create_cuestionario(
+    cuestionario_data: CuestionarioCreate,
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Crea un nuevo registro de cuestionario asociado a una sesión.
+    Valida que la sesión exista y que no tenga ya un cuestionario.
+    """
+    # 1. Validar que la sesión exista
+    sesion_stmt = select(Sesion).where(Sesion.sesion_id == cuestionario_data.sesion_id)
+    sesion_result = await session.execute(sesion_stmt)
+    if not sesion_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"La sesión con ID {cuestionario_data.sesion_id} no fue encontrada."
+        )
+
+    # 2. Validar que no exista ya un cuestionario para esta sesión (regla de 1 a 1)
+    existing_q_stmt = select(Cuestionario).where(Cuestionario.sesion_id == cuestionario_data.sesion_id)
+    existing_q_result = await session.execute(existing_q_stmt)
+    if existing_q_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Ya existe un cuestionario registrado para la sesión ID {cuestionario_data.sesion_id}."
+        )
+        
+    # 3. Crear el nuevo objeto Cuestionario
+    current_utc_time = datetime.now(timezone.utc)
+    new_cuestionario = Cuestionario(
+        **cuestionario_data.model_dump(), # Desempaqueta los datos del modelo Pydantic
+        created_at=current_utc_time,
+        updated_at=current_utc_time
+    )
+
+    try:
+        session.add(new_cuestionario)
+        await session.commit()
+        await session.refresh(new_cuestionario)
+        return new_cuestionario
+    except Exception as e:
+        await session.rollback() # Importante hacer rollback en caso de error
+        print(f"Error al crear el cuestionario: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error interno al guardar el cuestionario."
+        )
+
+@app.get("/trabajadores/{trabajador_id}", response_model=TrabajadorBasic)
+async def get_trabajador_by_id(
+    trabajador_id: int,
+    db: AsyncSession = Depends(get_session)
+):
+    stmt = select(Trabajador).where(Trabajador.trabajador_id == trabajador_id)
+    res = await db.execute(stmt)
+    t = res.scalars().first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Trabajador no encontrado")
+    return TrabajadorBasic(
+        trabajador_id=t.trabajador_id,
+        nombre=t.nombre,
+        username=t.username,
+        role_id=getattr(t, "role_id", None)  # asumiendo que ya agregaste role_id en tu tabla/modelo
+    )
+
+
+@app.get("/jefes/{jefe_id}/subordinados/", response_model=List[TrabajadorBasic])
+async def get_subordinados_de_jefe(
+    jefe_id: int,
+    db: AsyncSession = Depends(get_session)
+):
+    sql = text("""
+        SELECT t.trabajador_id, t.nombre, t.username, t.role_id
+        FROM trabajador_jefe tj
+        JOIN trabajadores t ON t.trabajador_id = tj.trabajador_id
+        WHERE tj.jefe_id = :jefe_id
+        ORDER BY t.nombre
+    """)
+    res = await db.execute(sql, {"jefe_id": jefe_id})
+    rows = res.mappings().all()
+    return [
+        TrabajadorBasic(
+            trabajador_id=row["trabajador_id"],
+            nombre=row["nombre"],
+            username=row["username"],
+            role_id=row["role_id"]
+        ) for row in rows
+    ]
+
+
+
+@app.get("/trabajadores/{trabajador_id}/basic", response_model=TrabajadorBasic)
+async def get_trabajador_basic_by_id(
+    trabajador_id: int,
+    db: AsyncSession = Depends(get_session)
+):
+    stmt = select(Trabajador).where(Trabajador.trabajador_id == trabajador_id)
+    res = await db.execute(stmt)
+    t = res.scalars().first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Trabajador no encontrado")
+    return TrabajadorBasic(
+        trabajador_id=t.trabajador_id,
+        nombre=t.nombre,
+        username=t.username,
+        role_id=getattr(t, "role_id", None)
+    )
+
+@app.get("/jefes/{jefe_id}/subordinados/", response_model=List[TrabajadorBasic])
+async def get_subordinados_de_jefe(
+    jefe_id: int,
+    db: AsyncSession = Depends(get_session)
+):
+    sql = text("""
+        SELECT t.trabajador_id, t.nombre, t.username, t.role_id
+        FROM trabajador_jefe tj
+        JOIN trabajadores t ON t.trabajador_id = tj.trabajador_id
+        WHERE tj.jefe_id = :jefe_id
+        ORDER BY t.nombre
+    """)
+    res = await db.execute(sql, {"jefe_id": jefe_id})
+    rows = res.mappings().all()
+    return [
+        TrabajadorBasic(
+            trabajador_id=row["trabajador_id"],
+            nombre=row["nombre"],
+            username=row["username"],
+            role_id=row["role_id"]
+        ) for row in rows
+    ]
+
+@app.get("/admin/usuarios")
+async def admin_listar_usuarios(
+    role_id: Optional[int] = Query(None),
+    session: AsyncSession = Depends(get_session)
+):
+    stmt = select(Trabajador)
+    if role_id is not None:
+        stmt = stmt.where(Trabajador.role_id == role_id)
+    res = await session.execute(stmt)
+    return res.scalars().all()
+
+
+@app.get("/admin/jefes")
+async def admin_listar_jefes(session: AsyncSession = Depends(get_session)):
+    stmt = select(Trabajador).where(Trabajador.role_id == 3)
+    res = await session.execute(stmt)
+    return res.scalars().all()
+
+@app.get("/admin/usuarios/sin-jefe")
+async def admin_usuarios_sin_jefe(session: AsyncSession = Depends(get_session)):
+    sql = text("""
+      SELECT t.trabajador_id, t.nombre, t.username, t.role_id
+      FROM trabajadores t
+      WHERE t.trabajador_id NOT IN (SELECT trabajador_id FROM trabajador_jefe)
+      ORDER BY t.nombre
+    """)
+    res = await session.execute(sql)
+    return res.mappings().all()
+
+
+@app.put("/admin/usuarios/{trabajador_id}/rol")
+async def admin_actualizar_rol(
+    trabajador_id: int,
+    payload: AdminRoleUpdate,
+    session: AsyncSession = Depends(get_session)
+):
+    q = select(Trabajador).where(Trabajador.trabajador_id == trabajador_id)
+    res = await session.execute(q)
+    t = res.scalars().first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    t.role_id = payload.role_id
+    t.updated_at = datetime.now(timezone.utc)
+
+    await session.commit()
+    await session.refresh(t)
+    msg = "Rol asignado con éxito." if payload.role_id == 3 else "Rol modificado con éxito."
+    return {"message": msg, "trabajador": t}
+
+
+
+@app.delete("/admin/usuarios/{trabajador_id}")
+async def admin_eliminar_usuario(
+    trabajador_id: int,
+    session: AsyncSession = Depends(get_session)
+):
+    # 1) verificar
+    res = await session.execute(select(Trabajador).where(Trabajador.trabajador_id == trabajador_id))
+    user = res.scalars().first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    # 2) borrar relaciones (si no hay CASCADE)
+    await session.execute(delete(TrabajadorJefe).where(
+        (TrabajadorJefe.trabajador_id == trabajador_id) | (TrabajadorJefe.jefe_id == trabajador_id)
+    ))
+    # borra sesiones y dependientes
+    sesiones_res = await session.execute(select(Sesion).where(Sesion.trabajador_id == trabajador_id))
+    sesiones = sesiones_res.scalars().all()
+    for s in sesiones:
+        await session.execute(delete(LecturaEstres).where(LecturaEstres.sesion_id == s.sesion_id))
+        await session.execute(delete(Cuestionario).where(Cuestionario.sesion_id == s.sesion_id))
+        await session.delete(s)
+
+    # 3) borrar usuario
+    await session.delete(user)
+    await session.commit()
+    return {"message": "Usuario eliminado exitosamente."}
+
+@app.delete("/admin/asignaciones")
+async def admin_eliminar_asignacion(
+    payload: AsignacionDelete,
+    session: AsyncSession = Depends(get_session)
+):
+    # existe?
+    q = select(TrabajadorJefe).where(
+        (TrabajadorJefe.jefe_id == payload.jefe_id) &
+        (TrabajadorJefe.trabajador_id == payload.subordinado_id)
+    )
+    res = await session.execute(q)
+    rel = res.scalars().first()
+    if not rel:
+        raise HTTPException(status_code=404, detail="Relación no encontrada")
+    await session.delete(rel)
+    await session.commit()
+    return {"message": "Asignación eliminada correctamente."}
+
+
+@app.post("/admin/asignaciones")
+async def admin_asignar_subordinados(
+    payload: AsignacionCreate,
+    session: AsyncSession = Depends(get_session)
+):
+    # verifica que el jefe sea rol 3
+    qj = select(Trabajador).where(Trabajador.trabajador_id == payload.jefe_id)
+    rj = await session.execute(qj)
+    jefe = rj.scalars().first()
+    if not jefe or jefe.role_id != 3:
+        raise HTTPException(status_code=400, detail="El jefe no es válido o no tiene rol de jefe (3).")
+
+    # verifica subordinados libres y no asignados
+    for sub_id in payload.subordinado_ids:
+        # ya asignado?
+        qs = select(TrabajadorJefe).where(TrabajadorJefe.trabajador_id == sub_id)
+        rs = await session.execute(qs)
+        if rs.scalars().first():
+            # CP054
+            raise HTTPException(status_code=409, detail=f"No se puede realizar la asignación: colaborador {sub_id} ya vinculado.")
+
+    # persiste
+    for sub_id in payload.subordinado_ids:
+        session.add(TrabajadorJefe(jefe_id=payload.jefe_id, trabajador_id=sub_id))
+    await session.commit()
+
+    return {"message": "Asignación registrada exitosamente."}
+
 
 
 # Desplegar la aplicacion usando uvicorn como servidor ASGI
