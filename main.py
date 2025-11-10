@@ -28,7 +28,7 @@ from PIL import Image
 from io import BytesIO
 import os
 import sys
-from sqlalchemy import delete, text
+from sqlalchemy import delete, text, func
 
 
 
@@ -809,7 +809,9 @@ async def get_monthly_daily_aggregated_summary(
     sesiones_statement = select(Sesion).where(
         Sesion.trabajador_id == trabajador_id,
         Sesion.fecha_sesion >= start_of_month,
-        Sesion.fecha_sesion < start_of_next_month
+        Sesion.fecha_sesion < start_of_next_month,
+        not_eliminado(Sesion.estado_grabacion),  # <-- filtro robusto
+
     ).order_by(Sesion.fecha_sesion)
 
     sesiones_results = await db_session.execute(sesiones_statement)
@@ -823,6 +825,12 @@ async def get_monthly_daily_aggregated_summary(
     daily_aggregated_data: Dict[date, Dict[str, any]] = {}
 
     for sesion_obj in sesiones_del_mes:
+        
+        estado_norm = (sesion_obj.estado_grabacion or "").strip().lower()
+        if estado_norm == "eliminado":
+            continue
+
+
         dia_sesion = sesion_obj.fecha_sesion
 
         # Inicializar el diccionario para el día si es la primera sesión de ese día
@@ -936,7 +944,9 @@ async def get_monthly_overall_summary_for_worker(
     sesiones_statement = select(Sesion).where(
         Sesion.trabajador_id == trabajador_id,
         Sesion.fecha_sesion >= start_of_month,
-        Sesion.fecha_sesion < start_of_next_month
+        Sesion.fecha_sesion < start_of_next_month,
+        not_eliminado(Sesion.estado_grabacion),  # <-- filtro robusto
+
     )
     sesiones_results = await db_session.execute(sesiones_statement)
     sesiones_del_mes = sesiones_results.scalars().all()
@@ -964,6 +974,9 @@ async def get_monthly_overall_summary_for_worker(
 
     # 2. Iterar sobre cada sesión del mes para acumular datos
     for sesion_obj in sesiones_del_mes:
+        if (sesion_obj.estado_grabacion or "").strip().lower() == "eliminado":
+            continue
+
         dias_activos_set.add(sesion_obj.fecha_sesion)
         
         # a. Acumular conteos de estrés y lecturas totales para esta sesión
@@ -1070,6 +1083,12 @@ async def get_all_cuestionarios(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
             detail="Ocurrió un error al intentar obtener la lista de cuestionarios."
         )
+
+# Filtro robusto para excluir sesiones "Eliminado"
+def not_eliminado(expr):
+    # expr debe ser la columna Sesion.estado_grabacion
+    return func.lower(func.trim(func.coalesce(expr, ""))) != "eliminado"
+
 
 @app.post(
     "/cuestionarios/", 
